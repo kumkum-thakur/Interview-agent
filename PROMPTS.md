@@ -1,3 +1,13 @@
+# Live Submission
+
+- Live app: https://interview-agent-drab.vercel.app
+- GitHub repo: https://github.com/kumkum-thakur/Interview-agent
+- This project was built entirely through an extended conversation with Claude
+  (claude.ai). That conversation is the authoritative build record. Export
+  attached separately as chat-transcript.md / .pdf (or linked here).
+
+---
+
 # PROMPTS.md
 
 This project was built through an extended conversation with Claude (claude.ai)
