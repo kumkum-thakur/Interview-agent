@@ -2,6 +2,7 @@ import candidatesData from "@/data/candidates.json";
 import curriculumData from "@/data/curriculum.json";
 import { askClaude, type ChatMessage } from "@/lib/llm";
 import { writeEpisode, searchEpisodes } from "@/lib/breeth";
+import { getSessionState, setSessionState } from "@/lib/session-store";
 
 type Mission = {
   day: number;
@@ -58,22 +59,12 @@ type SessionState = {
 const MIN_QUESTIONS = 8;
 const MIN_DAYS = 4;
 
-// In-memory session store. Fine for a hackathon demo - resets on server restart,
-// which is acceptable since the spec explicitly puts long-term persistence out of scope.
-const sessions = new Map<string, SessionState>();
-
 const curriculumDays: CurriculumDay[] = (curriculumData as any).days;
 
 function getCurriculumDay(day: number): CurriculumDay | undefined {
   return curriculumDays.find((d) => d.day === day);
 }
 
-/**
- * Rank the candidate's own curriculum days by how likely they are to reveal
- * a real gap: skipped topics first, then topics with the most attempts
- * (struggle signal), then everything else. This is what makes the interview
- * feel personalized instead of generic.
- */
 function priorityDaysFor(candidate: Candidate): number[] {
   const scored = candidate.missions.map((m) => {
     const skippedScore = m.skipped ? 1000 : 0;
@@ -145,13 +136,10 @@ OUTPUT FORMAT — respond with ONLY valid JSON, no markdown fences, matching exa
 function safeParseModelTurn(raw: string): ModelTurn {
   let text = raw.trim();
 
-  // Strip markdown code fences if present.
   if (text.startsWith("```")) {
     text = text.replace(/^```(json)?/i, "").replace(/```$/, "").trim();
   }
 
-  // The model sometimes adds a stray sentence before/after the JSON object.
-  // Extract just the outermost {...} block before parsing.
   const firstBrace = text.indexOf("{");
   const lastBrace = text.lastIndexOf("}");
   if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
@@ -169,7 +157,6 @@ function safeParseModelTurn(raw: string): ModelTurn {
     };
   } catch (err) {
     console.error("Failed to parse model JSON turn. Raw text was:", raw);
-    // Model didn't return clean JSON - degrade gracefully rather than crash the interview.
     return { reply: "Sorry, could you say that again?", done: false, coveredDay: null };
   }
 }
@@ -207,7 +194,7 @@ export async function startInterview(sessionId: string, candidate: Candidate) {
     questionCount: 0,
     priorityDays: priorityDaysFor(candidate),
   };
-  sessions.set(sessionId, state);
+  await setSessionState(sessionId, state);
 
   const system = buildSystemPrompt(state, "");
   const kickoff: ChatMessage = {
@@ -225,6 +212,8 @@ export async function startInterview(sessionId: string, candidate: Candidate) {
     state.daysCovered.push(turn.coveredDay);
   }
 
+  await setSessionState(sessionId, state);
+
   await writeEpisode({
     sessionId,
     content: `Interview started for ${candidate.member.name} (${candidate.member.jobRole}). ${
@@ -237,11 +226,8 @@ export async function startInterview(sessionId: string, candidate: Candidate) {
 }
 
 export async function continueInterview(sessionId: string, message: string) {
-  const state = sessions.get(sessionId);
+  const state = await getSessionState<SessionState>(sessionId);
 
-  // Defensive fallback: if the session isn't found (server restarted, etc.),
-  // we can't recover full context, but we keep the API contract intact
-  // rather than erroring out on the evaluator.
   if (!state) {
     return {
       reply:
@@ -282,13 +268,10 @@ export async function continueInterview(sessionId: string, message: string) {
     extractIntent: true,
   });
 
-  // Enforce the minimums server-side too, in case the model tries to end early.
   const metMinimums = state.questionCount >= MIN_QUESTIONS && state.daysCovered.length >= MIN_DAYS;
   const done = turn.done && metMinimums;
 
   if (turn.done && !metMinimums) {
-    // Model tried to wrap up too early. Don't just show the user a premature
-    // goodbye - correct the model and get a real next question instead.
     state.messages.push({
       role: "user",
       content: `[control] You have not yet met the minimum of ${MIN_QUESTIONS} questions across ${MIN_DAYS} distinct curriculum days (currently at ${state.questionCount} questions, ${state.daysCovered.length} days). Do not say goodbye or wrap up. Ask a genuine new technical question on a topic not yet covered.`,
@@ -300,6 +283,7 @@ export async function continueInterview(sessionId: string, message: string) {
     if (turn2.coveredDay && !state.daysCovered.includes(turn2.coveredDay)) {
       state.daysCovered.push(turn2.coveredDay);
     }
+    await setSessionState(sessionId, state);
     await writeEpisode({
       sessionId,
       content: turn2.memoryNote ?? `Continued interview after early-end correction, now on day ${turn2.coveredDay ?? "n/a"}.`,
@@ -307,6 +291,8 @@ export async function continueInterview(sessionId: string, message: string) {
     });
     return { reply: turn2.reply, done: false };
   }
+
+  await setSessionState(sessionId, state);
 
   if (done) {
     const feedback = turn.feedback ?? fallbackFeedback(state.candidate);
