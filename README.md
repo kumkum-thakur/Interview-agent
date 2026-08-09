@@ -18,8 +18,9 @@ retrieved understanding rather than just replaying the raw transcript.
    ```
 
 2. Copy `.env.example` to `.env.local` and fill in:
-   - `GEMINI_API_KEY` — a **free** key from https://aistudio.google.com (no credit card required)
+   - `GROQ_API_KEY` — a **free** key from https://console.groq.com/keys (no credit card)
    - `BREETH_API_KEY` — from your Breeth dashboard's API Keys page
+   - `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` — a **free** database from https://console.upstash.com (no credit card)
 
 3. Run the dev server:
    ```
@@ -39,15 +40,21 @@ POST /api/interview
 **Turn:** `{ "sessionId": "...", "message": "..." }`
 **Response:** `{ "reply": "...", "done": false }` or, when finished, `{ "reply": "...", "done": true, "feedback": {...} }`
 
+## Architecture
+
+- **Frontend/API**: Next.js (App Router), single deployable app
+- **LLM**: Groq's free API (Llama 3.3 70B), called via `lib/llm.ts`. JSON output is enforced via Groq's `response_format: { type: "json_object" }` so the model reliably returns structured turns instead of drifting into prose over a long conversation.
+- **Session persistence**: Upstash Redis (`lib/session-store.ts`) — chosen over an in-memory store because Vercel runs API routes as serverless functions, where a plain in-memory Map can lose state between requests hitting different instances.
+- **Memory**: Breeth (`lib/breeth.ts`) — called directly via REST at runtime (separate from MCP, which is used by the coding assistant during development, not by the deployed app). A memory note is written after every candidate answer, and relevant memory is retrieved before generating the next question.
+
 ## Notes on Breeth integration
 
-`lib/breeth.ts` calls Breeth's REST API directly (not MCP — MCP is used by the
-coding assistant while building, this app talks to Breeth at runtime). The
-exact endpoint shape was best-effort matched against Breeth's public docs at
-build time; if the retrieval endpoint differs, only `lib/breeth.ts` needs
-adjusting, nothing else in the app depends on its internals.
+`lib/breeth.ts` calls Breeth's REST API directly. The exact endpoint shape was
+best-effort matched against Breeth's public docs at build time and confirmed
+working via the dashboard's Writes/Retrievals counters during testing (both
+climbed as expected across multiple full interview runs).
 
 ## Deploying
 
-Deploy to Vercel, add the same two environment variables in the Vercel project
-settings, and you're live.
+Deploy to Vercel, add the same four environment variables in the Vercel project
+settings (Production and Preview), and you're live.
